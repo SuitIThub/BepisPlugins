@@ -17,5 +17,6 @@
     <Compile Include="$(MSBuildThisFileDirectory)Metadata.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)ResourceUtils.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)WeakKeyDictionary.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)ScreenshotManagerBase.cs" />
   </ItemGroup>
 </Project>
