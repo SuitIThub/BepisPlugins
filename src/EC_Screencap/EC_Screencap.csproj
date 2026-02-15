@@ -52,6 +52,9 @@
       <HintPath>..\..\packages\IllusionLibs.BepInEx.5.4.22\lib\net35\BepInEx.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="HS2Wiki">
+      <HintPath>..\..\..\HS2Wiki\obj\Debug\HS2Wiki.dll</HintPath>
+    </Reference>
     <Reference Include="IL, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\..\packages\IllusionLibs.EmotionCreators.IL.2019.6.6.4\lib\net46\IL.dll</HintPath>
       <Private>False</Private>

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <MSBuildAllProjects>$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
@@ -14,5 +14,7 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="$(MSBuildThisFileDirectory)Resources\composite.unity3d" />
+    <EmbeddedResource Include="$(MSBuildThisFileDirectory)Resources\rgalpha.unity3d" />
+    <EmbeddedResource Include="$(MSBuildThisFileDirectory)Resources\blackout.unity3d" />
   </ItemGroup>
 </Project>

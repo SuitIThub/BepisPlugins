@@ -52,6 +52,9 @@
       <HintPath>..\..\packages\IllusionLibs.BepInEx.5.4.22\lib\net35\BepInEx.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="HS2Wiki">
+      <HintPath>..\..\..\HS2Wiki\obj\Debug\HS2Wiki.dll</HintPath>
+    </Reference>
     <Reference Include="PostProcessingRuntime">
       <HintPath>..\..\lib\PostProcessingRuntime.dll</HintPath>
       <Private>False</Private>

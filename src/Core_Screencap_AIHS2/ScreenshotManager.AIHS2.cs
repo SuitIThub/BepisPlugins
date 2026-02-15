@@ -1,6 +1,9 @@
-﻿using BepInEx.Configuration;
+using System.Linq;
+using System.Reflection;
+using BepInEx.Configuration;
 using BepisPlugins;
 using Pngcs.Unity;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -153,7 +156,7 @@ namespace Screencap
 
         /// <summary>
         /// Captures a transparent screenshot by disabling background and compositing alpha.
-        /// Temporarily modifies scene settings to achieve transparency.
+        /// Uses red/green two-pass when available so semi-transparent areas (e.g. skirt) are preserved.
         /// </summary>
         private static RenderTexture CaptureTransparent(int width, int height, int downscaling)
         {
@@ -175,7 +178,7 @@ namespace Screencap
             var ppl = cam.GetComponent<PostProcessLayer>();
             if (ppl != null) ppl.enabled = false;
 
-            //Disable background. Sinful, truly.
+            // Disable background so we only render the character/scene objects.
             var bg = SceneManager.GetActiveScene().GetRootGameObjects()[0].transform.Find("CustomControl/Map3D/p_ai_mi_createBG00_00");
             GameObject m3D = null;
             if (bg != null) m3D = bg.gameObject;
@@ -189,28 +192,90 @@ namespace Screencap
                 else dof = null;
             }
 
-            var mask = CaptureScreen(scaledWidth, scaledHeight, true);
+            // Ensure optional two-pass bundles are loaded so we can prefer red/green alpha.
+            if (!_matRgAlpha) LoadBundleRgAlpha();
+            if (!_matMask) LoadBundleBlackout();
+
+            var useTwoPass = _rgAlphaAvailable && _matMask != null && _matMask.shader != null;
+            if (useTwoPass && !_twoPassLogged)
+            {
+                _twoPassLogged = true;
+                Logger.LogInfo("Screencap: using red/green two-pass alpha capture (semi-transparent areas preserved).");
+            }
+
+            RenderTexture result;
+            if (useTwoPass)
+            {
+                // Two-pass red/green: semi-transparent pixels get correct alpha instead of being dropped.
+                var rtR = CaptureScreenWithBackground(scaledWidth, scaledHeight, new Color(1, 0, 0, 1));
+                var rtG = CaptureScreenWithBackground(scaledWidth, scaledHeight, new Color(0, 1, 0, 1));
+
+                var rtAlphaMask = RenderTexture.GetTemporary(scaledWidth, scaledHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+                MatRgAlpha.SetTexture("_green", rtG);
+                Graphics.Blit(rtR, rtAlphaMask, MatRgAlpha);
+
+                result = RenderTexture.GetTemporary(scaledWidth, scaledHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+                Graphics.Blit(Texture2D.blackTexture, result);
+                MatMask.SetTexture("_MainTex", colour);
+                MatMask.SetTexture("_Mask", rtAlphaMask);
+                Graphics.Blit(colour, result, MatMask);
+
+                RenderTexture.ReleaseTemporary(rtR);
+                RenderTexture.ReleaseTemporary(rtG);
+                RenderTexture.ReleaseTemporary(rtAlphaMask);
+                RenderTexture.ReleaseTemporary(colour);
+            }
+            else
+            {
+                // Fallback: single transparent pass (semi-transparent areas may be lost).
+                var mask = CaptureScreen(scaledWidth, scaledHeight, true);
+                result = RenderTexture.GetTemporary(scaledWidth, scaledHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+                Graphics.Blit(Texture2D.blackTexture, result);
+                MatComposite.SetTexture("_Overlay", mask);
+                Graphics.Blit(colour, result, MatComposite);
+                RenderTexture.ReleaseTemporary(mask);
+                RenderTexture.ReleaseTemporary(colour);
+            }
 
             if (ppl != null) ppl.enabled = true;
             if (dof != null) dof.enabled = true;
             if (m3D != null) m3D.SetActive(true);
 
-            var alpha = RenderTexture.GetTemporary(scaledWidth, scaledHeight, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
-
-            // Prevent previous frames from bleeding through when rapid captures are taken
-            Graphics.Blit(Texture2D.blackTexture, alpha);
-
-            MatComposite.SetTexture("_Overlay", mask);
-
-            Graphics.Blit(colour, alpha, MatComposite);
-
-            RenderTexture.ReleaseTemporary(mask);
-            RenderTexture.ReleaseTemporary(colour);
-
             if (downscaling > 1)
-                alpha = ScaleTex(alpha, width, height, downscaling);
+                result = ScaleTex(result, width, height, downscaling);
 
-            return alpha;
+            return result;
+        }
+
+        /// <summary>
+        /// Renders the scene with a solid background color. Used for red/green alpha derivation
+        /// so semi-transparent areas blend with the background and can be recovered.
+        /// </summary>
+        private static RenderTexture CaptureScreenWithBackground(int width, int height, Color backgroundColor)
+        {
+            var aos = DisableAmbientOcclusion();
+            var rt = RenderTexture.GetTemporary(width, height, 32, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default);
+            var cam = Camera.main;
+            var oldCf = cam.clearFlags;
+            var oldBg = cam.backgroundColor;
+            var oldRt = cam.targetTexture;
+            var oldRtc = Camera.current.targetTexture;
+
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = backgroundColor;
+            cam.targetTexture = rt;
+            cam.Render();
+
+            cam.clearFlags = oldCf;
+            cam.backgroundColor = oldBg;
+            cam.targetTexture = oldRt;
+            Camera.current.targetTexture = oldRtc;
+
+            if (DisableAO.Value == DisableAOSetting.Always || DisableAO.Value == DisableAOSetting.WhenUpsampling && DownscalingRate.Value > 1)
+                foreach (var ao in aos)
+                    ao.enabled.value = true;
+
+            return rt;
         }
 
         #endregion
@@ -219,6 +284,11 @@ namespace Screencap
 
         private static Material _matComposite;
         private static Material _matScale;
+        private static Material _matRgAlpha;
+        private static Material _matMask;
+        private static bool _rgAlphaAvailable;
+        private static bool _twoPassLogged;
+
         private static Material MatComposite
         {
             get
@@ -233,6 +303,73 @@ namespace Screencap
             {
                 if (!_matScale) LoadBundleComposite();
                 return _matScale;
+            }
+        }
+        private static Material MatRgAlpha
+        {
+            get
+            {
+                if (!_matRgAlpha) LoadBundleRgAlpha();
+                return _matRgAlpha;
+            }
+        }
+        private static Material MatMask
+        {
+            get
+            {
+                if (!_matMask) LoadBundleBlackout();
+                return _matMask;
+            }
+        }
+
+        /// <summary>
+        /// Load embedded resource bytes when multiple manifest names can match (e.g. Screencap.rgalpha.unity3d and Screencap.Resources.rgalpha.unity3d).
+        /// Prefers the name containing ".Resources." so the explicit embed from Core_Screencap_AIHS2/Resources is used.
+        /// </summary>
+        private static byte[] GetEmbeddedResourceBytes(Assembly asm, string fileName)
+        {
+            var names = asm.GetManifestResourceNames().Where(n => n.EndsWith(fileName, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (names.Count == 0) return null;
+            var name = names.FirstOrDefault(n => n.Contains(".Resources.")) ?? names[0];
+            using (var stream = asm.GetManifestResourceStream(name))
+                return stream != null ? ResourceUtils.ReadAllBytes(stream) : null;
+        }
+
+        private static void LoadBundleRgAlpha()
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            var bytes = GetEmbeddedResourceBytes(asm, "rgalpha.unity3d") ?? GetEmbeddedResourceBytes(Assembly.GetEntryAssembly(), "rgalpha.unity3d");
+            if (bytes == null || bytes.Length == 0) { _rgAlphaAvailable = false; return; }
+            try
+            {
+                var ab = AssetBundle.LoadFromMemory(bytes);
+                var shader = ab.LoadAsset<Shader>("rgAlpha2") ?? ab.LoadAsset<Shader>("rgAlpha");
+                _matRgAlpha = shader != null ? new Material(shader) : null;
+                ab.Unload(false);
+                _rgAlphaAvailable = _matRgAlpha != null && _matRgAlpha.shader != null;
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning($"Screencap: failed to load rgalpha bundle: {e.Message}");
+                _rgAlphaAvailable = false;
+            }
+        }
+
+        private static void LoadBundleBlackout()
+        {
+            var asm = Assembly.GetExecutingAssembly();
+            var bytes = GetEmbeddedResourceBytes(asm, "blackout.unity3d") ?? GetEmbeddedResourceBytes(Assembly.GetEntryAssembly(), "blackout.unity3d");
+            if (bytes == null || bytes.Length == 0) return;
+            try
+            {
+                var ab = AssetBundle.LoadFromMemory(bytes);
+                var shader = ab.LoadAsset<Shader>("alphamask.shader") ?? ab.LoadAsset<Shader>("alphaMask") ?? ab.LoadAsset<Shader>("Shader Forge/alphaMask");
+                _matMask = shader != null ? new Material(shader) : null;
+                ab.Unload(false);
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning($"Screencap: failed to load blackout bundle: {e.Message}");
             }
         }
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -10,6 +10,8 @@ using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using BepisPlugins;
+using HS2Wiki;
+using Illusion.Component.UI.ColorPicker;
 using Shared;
 using UnityEngine;
 
@@ -25,6 +27,7 @@ namespace Screencap
     /// - Saved resolution presets
     /// </summary>
     [BepInPlugin(GUID, PluginName, Version)]
+    [BepInDependency("com.suit.hs2wiki", BepInDependency.DependencyFlags.SoftDependency)]
     public partial class ScreenshotManager : BaseUnityPlugin
     {
         internal static new ManualLogSource Logger;
@@ -348,7 +351,7 @@ namespace Screencap
             KeyCapture360in3D = Config.Bind(
                 "Keyboard shortcuts", "Take 360 3D screenshot",
                 new KeyboardShortcut(KeyCode.F11, KeyCode.LeftControl, KeyCode.LeftShift),
-                new ConfigDescription("Captures a 360 screenshot around current camera in stereoscopic 3D (2 captures for each eye in one image). These images can be viewed by image viewers supporting 3D stereo format (e.g. VR Media Player - 360� Viewer)."));
+                new ConfigDescription("Captures a 360 screenshot around current camera in stereoscopic 3D (2 captures for each eye in one image). These images can be viewed by image viewers supporting 3D stereo format (e.g. VR Media Player - 360° Viewer)."));
 
             EyeSeparation = Config.Bind(
                 "3D Settings", "3D screenshot eye separation",
@@ -453,6 +456,12 @@ namespace Screencap
                 Directory.CreateDirectory(ScreenshotDir);
 
             Hooks.InstallHooks();
+
+            var api = WikiPlugin.PublicAPI;
+            if (api != null)
+            {
+                api.RegisterPage("Mein Plugin", "Hauptseite", DrawDemoPage);
+            }
         }
 
         private void Update()
@@ -562,6 +571,33 @@ namespace Screencap
         private Rect _uiRect = new Rect(20, Mathf.RoundToInt(Screen.height / 2f) - 250, 160, 500);
         private bool _uiShow;
         private string _resolutionXBuffer = "", _resolutionYBuffer = "";
+
+        private void DrawDemoPage()
+        {
+            GUILayout.Label("<b>Das ist eine Beispielseite für das Wiki.</b>");
+            GUILayout.Space(10);
+
+            GUILayout.Label("Du kannst:");
+            GUILayout.Label("✅ Text anzeigen");
+            GUILayout.Label("✅ Buttons verwenden");
+            GUILayout.Label("✅ Scrollbare Inhalte verwenden");
+            GUILayout.Label("✅ Bilder anzeigen");
+
+            GUILayout.Space(10);
+
+            if (GUILayout.Button("Klick mich!"))
+            {
+                Logger.LogInfo("Button wurde in der Beispielseite geklickt!");
+            }
+
+            GUILayout.Space(20);
+            GUILayout.Label("Bild-Beispiel:");
+
+            GUILayout.Space(10);
+
+            GUILayout.Label("🎞️ Video oder GIFs in Unity GUI sind schwieriger...");
+            GUILayout.Label("Nutze ggf. ein externes Plugin oder HTML/Asset-Browser-Fenster.");
+        }
 
         private void OnGUI()
         {

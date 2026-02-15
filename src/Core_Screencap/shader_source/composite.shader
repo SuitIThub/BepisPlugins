@@ -40,7 +40,10 @@ Shader "Unlit/composite"
                 mt.rgb *= mt.a;
                 o.rgb *= o.a;
                 float3 rgb = o.rgb + (mt.rgb * (1 - o.a));
-                float a = o.a + mt.rgb * (1.0 - o.a);
+                // Use overlay (mask) alpha only - it comes from the transparent pass and preserves
+                // semi-transparent areas (e.g. skirt). Main tex is the opaque capture and must not
+                // modulate alpha or dark/background pixels would remove those areas.
+                float a = o.a;
                 return float4(rgb, a);
             }
             ENDCG

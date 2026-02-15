@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -54,6 +54,9 @@
       <HintPath>..\..\packages\IllusionLibs.BepInEx.5.4.22\lib\net35\BepInEx.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="HS2Wiki">
+      <HintPath>..\..\..\HS2Wiki\obj\Debug\HS2Wiki.dll</HintPath>
+    </Reference>
     <Reference Include="Sirenix.Serialization, Version=2.0.13.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\..\packages\IllusionLibs.AIGirl.Sirenix.Serialization.2020.5.29.5\lib\net46\Sirenix.Serialization.dll</HintPath>
       <Private>False</Private>
@@ -105,6 +108,11 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Properties\" />
+  </ItemGroup>
+  <!-- Embed alpha-capture bundles from shared Resources (required for semi-transparent alpha capture) -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\Core_Screencap_AIHS2\Resources\rgalpha.unity3d" Condition="Exists('..\Core_Screencap_AIHS2\Resources\rgalpha.unity3d')" />
+    <EmbeddedResource Include="..\Core_Screencap_AIHS2\Resources\blackout.unity3d" Condition="Exists('..\Core_Screencap_AIHS2\Resources\blackout.unity3d')" />
   </ItemGroup>
   <ItemGroup>
     <Analyzer Include="..\..\packages\BepInEx.Analyzers.1.0.8\analyzers\dotnet\cs\BepInEx.Analyzers.CodeFixes.dll" />
