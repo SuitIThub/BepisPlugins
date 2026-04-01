@@ -100,7 +100,7 @@ namespace Screencap
             yield return new WaitForEndOfFrame();
 
             var alphaAllowed = SceneManager.GetActiveScene().name == "CharaCustom" || Constants.InsideStudio;
-            var alpha = CaptureAlphaMode.Value != AlphaMode.None && alphaAllowed ? AlphaModeUtils.Default : AlphaMode.None;
+            var alpha = CaptureAlphaMode.Value != AlphaMode.None && alphaAllowed ? CaptureAlphaMode.Value : AlphaMode.None;
 
             var output = !in3D ? CaptureRender(transparencyMode: alpha) : Do3DCapture(() => CaptureRender(transparencyMode: alpha));
 
@@ -117,7 +117,7 @@ namespace Screencap
 
         private RenderTexture DoCaptureRender(int width, int height, int downscaling, AlphaMode transparencyMode)
         {
-            return transparencyMode == AlphaMode.None ? CaptureOpaque(width, height, downscaling) : CaptureTransparent(width, height, downscaling);
+            return transparencyMode == AlphaMode.None ? CaptureOpaque(width, height, downscaling) : CaptureTransparent(width, height, downscaling, transparencyMode);
         }
 
         /// <summary>
@@ -156,9 +156,9 @@ namespace Screencap
 
         /// <summary>
         /// Captures a transparent screenshot by disabling background and compositing alpha.
-        /// Uses red/green two-pass when available so semi-transparent areas (e.g. skirt) are preserved.
+        /// Uses red/green two-pass for rgAlpha (preserves semi-transparent areas); single-pass for composite/blackout.
         /// </summary>
-        private static RenderTexture CaptureTransparent(int width, int height, int downscaling)
+        private static RenderTexture CaptureTransparent(int width, int height, int downscaling, AlphaMode transparencyMode)
         {
             var scaledWidth = width * downscaling;
             var scaledHeight = height * downscaling;
@@ -192,11 +192,14 @@ namespace Screencap
                 else dof = null;
             }
 
-            // Ensure optional two-pass bundles are loaded so we can prefer red/green alpha.
-            if (!_matRgAlpha) LoadBundleRgAlpha();
-            if (!_matMask) LoadBundleBlackout();
-
-            var useTwoPass = _rgAlphaAvailable && _matMask != null && _matMask.shader != null;
+            // Use red/green two-pass only for rgAlpha (gradual); composite and blackout use single-pass.
+            var useTwoPass = transparencyMode == AlphaMode.rgAlpha;
+            if (useTwoPass)
+            {
+                if (!_matRgAlpha) LoadBundleRgAlpha();
+                if (!_matMask) LoadBundleBlackout();
+            }
+            useTwoPass = useTwoPass && _rgAlphaAvailable && _matMask != null && _matMask.shader != null;
             if (useTwoPass && !_twoPassLogged)
             {
                 _twoPassLogged = true;
@@ -442,6 +445,7 @@ namespace Screencap
                 GameObject.DestroyImmediate(t2d);
                 yield return null;
                 File.WriteAllBytes(filename, encoded);
+                NotifyScreenshotFileSaved(filename);
             }
             else
             {
@@ -458,11 +462,13 @@ namespace Screencap
                 {
                     using (var buffer = req.GetData<Color32>())
                         yield return PNG.WriteAsync(buffer.ToArray(), req.width, req.height, 8, true, false, filename);
+                    NotifyScreenshotFileSaved(filename);
                 }
                 else
                 {
                     using (var buffer = req.GetData<Color>())
                         yield return PNG.WriteAsync(buffer.ToArray(), req.width, req.height, 8, false, false, filename);
+                    NotifyScreenshotFileSaved(filename);
                 }
             }
         }

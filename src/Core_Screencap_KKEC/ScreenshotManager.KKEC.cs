@@ -1,4 +1,4 @@
-﻿using alphaShot;
+using alphaShot;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using System.Collections;
@@ -99,6 +99,7 @@ namespace Screencap
                 GameObject.DestroyImmediate(t2d);
                 yield return null;
                 File.WriteAllBytes(filename, encoded);
+                NotifyScreenshotFileSaved(filename);
             }
             else
             {
@@ -121,6 +122,7 @@ namespace Screencap
                     px = buffer.ToArray();
 #endif
                 yield return PNG.WriteAsync(px, width, height, 8, true, false, filename);
+                NotifyScreenshotFileSaved(filename);
             }
         }
     }

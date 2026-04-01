@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using BepisPlugins;
 using Screencap;
@@ -145,6 +145,7 @@ namespace alphaShot
                     fullSizeCapture = CaptureAlpha(newWidth, newHeight);
                     break;
                 case AlphaMode.rgAlpha:
+                case AlphaMode.composite:
                     fullSizeCapture = CaptureRgAlpha(newWidth, newHeight);
                     break;
                 default:

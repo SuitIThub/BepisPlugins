@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -17,6 +17,8 @@ namespace Screencap
     {
         private static Material _equirectangularConverter;
         private static int _paddingX;
+        private static int _cameraRotationMatrixID;
+        private static int _is180ID;
         private static Harmony _hi;
 
         private static void Init()
@@ -27,6 +29,8 @@ namespace Screencap
             var ab = AssetBundle.LoadFromMemory(abd);
             _equirectangularConverter = new Material(ab.LoadAsset<Shader>("assets/shaders/equirectangularconverter.shader"));
             _paddingX = Shader.PropertyToID("_PaddingX");
+            _cameraRotationMatrixID = Shader.PropertyToID("_CameraRotationMatrix");
+            _is180ID = Shader.PropertyToID("_is180");
             ab.Unload(false);
 
             if (_hi == null)
@@ -62,7 +66,7 @@ namespace Screencap
             }
         }
 
-        public static RenderTexture CaptureTex(int width = 1024, Camera renderCam = null, bool faceCameraDirection = true)
+        public static RenderTexture CaptureTex(int width = 1024, Camera renderCam = null, bool faceCameraDirection = true, bool is180 = false)
         {
             Init();
 
@@ -83,20 +87,28 @@ namespace Screencap
 
             RenderTexture camTarget = renderCam.targetTexture;
 
-            int cubemapSize = Mathf.Min(Mathf.NextPowerOfTwo(width), 16384);
+            int cubemapSize = Mathf.Min(Mathf.NextPowerOfTwo(width), 32768);
             RenderTexture cubemap = null, equirectangularTexture;
             try
             {
                 cubemap = RenderTexture.GetTemporary(cubemapSize, cubemapSize, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default, 1);
                 cubemap.dimension = UnityEngine.Rendering.TextureDimension.Cube;
 
-                equirectangularTexture = RenderTexture.GetTemporary(cubemapSize, cubemapSize / 2, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default, 1);
+                if (is180)
+                    equirectangularTexture = RenderTexture.GetTemporary(cubemapSize / 2, cubemapSize / 2, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default, 1);
+                else
+                    equirectangularTexture = RenderTexture.GetTemporary(cubemapSize, cubemapSize / 2, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Default, 1);
                 equirectangularTexture.dimension = UnityEngine.Rendering.TextureDimension.Tex2D;
 
                 if (!renderCam.RenderToCubemap(cubemap))
                     throw new Exception("Rendering to cubemap is not supported on the current camera");
 
                 _equirectangularConverter.SetFloat(_paddingX, faceCameraDirection ? (renderCam.transform.eulerAngles.y / 360f) : 0f);
+
+                if (faceCameraDirection && is180)
+                    _equirectangularConverter.SetMatrix(_cameraRotationMatrixID, renderCam.transform.localToWorldMatrix);
+
+                _equirectangularConverter.SetInt(_is180ID, is180 ? 1 : 0);
                 Graphics.Blit(cubemap, equirectangularTexture, _equirectangularConverter);
 
                 return equirectangularTexture;

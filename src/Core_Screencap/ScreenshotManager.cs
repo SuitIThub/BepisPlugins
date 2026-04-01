@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -33,6 +33,10 @@ namespace Screencap
         internal static new ManualLogSource Logger;
         internal static ScreenshotManager Instance;
 
+        private static readonly object _screenshotCompletionLock = new object();
+        private static bool _pendingScreenshotCompletion;
+        private static string _lastScreenshotRelativePath;
+
         #region Public API
 
         /// <summary>
@@ -49,10 +53,98 @@ namespace Screencap
         public const string Version = Metadata.PluginsVersion;
 
         /// <summary>
-        /// Directory where screenshots are saved.
-        /// If the default directory is being overridden, it must already exist.
+        /// Config entry: folder under the game install where screenshots are saved (relative path).
+        /// Use <see cref="SetScreenshotSaveRelativePath"/> to change this from another plugin.
         /// </summary>
-        public static string ScreenshotDir { get; set; } = Path.Combine(Paths.GameRootPath, @"UserData\cap\");
+        public static ConfigEntry<string> ScreenshotSaveRelativePath { get; private set; }
+
+        /// <summary>
+        /// Full path to the directory where screenshots are written. Derived from the game root and <see cref="ScreenshotSaveRelativePath"/>.
+        /// </summary>
+        public static string ScreenshotDir => GetScreenshotDirectoryFullPath();
+
+        /// <summary>
+        /// Sets the screenshot save folder as a path relative to the game install directory. Persists to the configuration file.
+        /// </summary>
+        /// <param name="relativePath">
+        /// Path under the game root, e.g. <c>UserData\cap</c> or <c>UserData\myshots</c>.
+        /// Backslashes or forward slashes are accepted. Must not resolve outside the game directory (no <c>..</c> escape).
+        /// </param>
+        /// <returns><c>true</c> if the value was applied; <c>false</c> if plugin configuration is not initialized yet (call from or after <c>Awake</c>).</returns>
+        /// <exception cref="ArgumentException">Thrown when <paramref name="relativePath"/> is empty or resolves outside the game folder.</exception>
+        public static bool SetScreenshotSaveRelativePath(string relativePath)
+        {
+            if (ScreenshotSaveRelativePath == null)
+                return false;
+
+            ScreenshotSaveRelativePath.Value = ValidateRelativePathUnderGameRoot(relativePath);
+            EnsureScreenshotDirectoryExists();
+            return true;
+        }
+
+        /// <summary>
+        /// Sets the pixel size for rendered (F11) screenshots — not UI captures or 360° panoramas.
+        /// Values are clamped to the same min/max as the in-game settings (including the extreme-resolution cap when enabled).
+        /// </summary>
+        /// <param name="width">Output width in pixels.</param>
+        /// <param name="height">Output height in pixels.</param>
+        /// <returns><c>true</c> if both config entries were updated; <c>false</c> if configuration is not initialized yet.</returns>
+        public static bool SetScreenshotResolution(int width, int height)
+        {
+            if (ResolutionX == null || ResolutionY == null || ResolutionAllowExtreme == null)
+                return false;
+
+            var max = ResolutionAllowExtreme.Value ? 15360 : 4096;
+            ResolutionX.Value = Mathf.Clamp(width, ScreenshotSizeMin, max);
+            ResolutionY.Value = Mathf.Clamp(height, ScreenshotSizeMin, max);
+            if (Instance != null)
+            {
+                Instance._resolutionXBuffer = ResolutionX.Value.ToString();
+                Instance._resolutionYBuffer = ResolutionY.Value.ToString();
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Sets transparency (alpha) mode for rendered screenshots using a human-readable name.
+        /// </summary>
+        /// <param name="alphaModeName">
+        /// Case-insensitive. Accepts: UI labels <c>No</c>, <c>Cutout</c>, <c>Gradual</c>, <c>Composite</c>;
+        /// enum names <c>None</c>, <c>blackout</c>, <c>rgAlpha</c>, <c>composite</c>; or a numeric string <c>0</c>–<c>3</c> matching <see cref="AlphaMode"/>.
+        /// </param>
+        /// <returns><c>true</c> if the name was recognized and saved; <c>false</c> if unknown, empty, or configuration is not initialized.</returns>
+        public static bool SetCaptureAlphaModeByName(string alphaModeName)
+        {
+            if (CaptureAlphaMode == null)
+                return false;
+            if (!AlphaModeUtils.TryParseAlphaModeName(alphaModeName, out var mode))
+                return false;
+            CaptureAlphaMode.Value = mode;
+            return true;
+        }
+
+        /// <summary>
+        /// Returns whether a screenshot started by this plugin has finished writing to disk since the last successful call.
+        /// Only successful writes are reported. Call this from a later frame or after a short delay; each completion is consumed once.
+        /// </summary>
+        /// <param name="screenshotRelativePath">
+        /// When <c>true</c>, the path relative to the game install directory (save folder plus filename), e.g. <c>UserData\cap\GameName-2025-01-01-12-00-00.png</c>.
+        /// Uses backslashes on Windows.
+        /// </param>
+        /// <returns><c>true</c> if a completed screenshot was pending; that completion is cleared so the next call returns <c>false</c> until another screenshot finishes.</returns>
+        public static bool TryConsumeLastCompletedScreenshot(out string screenshotRelativePath)
+        {
+            screenshotRelativePath = null;
+            lock (_screenshotCompletionLock)
+            {
+                if (!_pendingScreenshotCompletion)
+                    return false;
+                _pendingScreenshotCompletion = false;
+                screenshotRelativePath = _lastScreenshotRelativePath;
+                return true;
+            }
+        }
 
         /// <summary>
         /// Triggered before a screenshot is captured. For use by plugins adding screen effects incompatible with Screencap.
@@ -65,7 +157,7 @@ namespace Screencap
         /// <summary>
         /// Triggers the pre-capture event, allowing other plugins to perform actions before a screenshot is taken.
         /// Usually used to disable effects that might interfere with the screenshot capture.
-        /// Call this before any <see cref="CaptureRender"/> or <see cref="Capture360"/> calls.
+        /// Call this before any <see cref="CaptureRender"/> or panorama capture calls.
         /// Always remember to call <see cref="FirePostCapture"/> after the capture is done to restore any changes made by plugins.
         /// </summary>
         public static void FirePreCapture()
@@ -139,12 +231,24 @@ namespace Screencap
         /// </summary>
         /// <param name="resolution">Optional resolution for the screenshot. Defaults to the configured 360 resolution.</param>
         /// <param name="faceCameraDirection">If true, the capture will face the camera's current direction.</param>
-        /// <returns>A RenderTexture containing the captured 360-degree screenshot. Returns null if the capture fails.</returns>
+        /// <returns>A RenderTexture containing the captured panorama screenshot. Returns null if the capture fails.</returns>
         public static RenderTexture Capture360(int? resolution = null, bool faceCameraDirection = true)
+        {
+            return Capture360(resolution, faceCameraDirection, is180Override: false);
+        }
+
+        /// <summary>
+        /// Captures a panorama screenshot and optionally overrides whether it is rendered as 180° or 360°.
+        /// </summary>
+        /// <param name="resolution">Optional resolution for the screenshot. Defaults to the configured 360 resolution.</param>
+        /// <param name="faceCameraDirection">If true, the capture will face the camera's current direction.</param>
+        /// <param name="is180Override">If set, forces 180° or full 360° equirectangular for this capture; if null, full 360° is used.</param>
+        /// <returns>A RenderTexture containing the captured panorama screenshot. Returns null if the capture fails.</returns>
+        public static RenderTexture Capture360(int? resolution = null, bool faceCameraDirection = true, bool? is180Override = null)
         {
             try
             {
-                return I360Render.CaptureTex(resolution ?? Resolution360.Value, faceCameraDirection: faceCameraDirection);
+                return I360Render.CaptureTex(resolution ?? Resolution360.Value, faceCameraDirection: faceCameraDirection, is180: is180Override ?? false);
             }
             catch (Exception ex)
             {
@@ -214,6 +318,75 @@ namespace Screencap
 
         #endregion
 
+        private const string DefaultScreenshotSaveRelativePath = @"UserData\cap";
+
+        private static string GetScreenshotDirectoryFullPath()
+        {
+            var rel = ScreenshotSaveRelativePath != null && !string.IsNullOrWhiteSpace(ScreenshotSaveRelativePath.Value)
+                ? ScreenshotSaveRelativePath.Value
+                : DefaultScreenshotSaveRelativePath;
+            var trimmed = rel.Trim().Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
+            return Path.GetFullPath(Path.Combine(Paths.GameRootPath, trimmed));
+        }
+
+        private static string ValidateRelativePathUnderGameRoot(string relativePath)
+        {
+            if (string.IsNullOrWhiteSpace(relativePath))
+                throw new ArgumentException("Relative path cannot be null or empty.", nameof(relativePath));
+
+            var trimmed = relativePath.Trim().Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
+            var combined = Path.GetFullPath(Path.Combine(Paths.GameRootPath, trimmed));
+            var root = Path.GetFullPath(Paths.GameRootPath);
+            if (!combined.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Screenshot path must resolve inside the game directory.", nameof(relativePath));
+            if (combined.Equals(root, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Screenshot path cannot be the game root directory.", nameof(relativePath));
+
+            return combined.Length > root.Length
+                ? combined.Substring(root.Length).TrimStart(Path.DirectorySeparatorChar)
+                : ".";
+        }
+
+        private static void EnsureScreenshotDirectoryExists()
+        {
+            var dir = GetScreenshotDirectoryFullPath();
+            if (!Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+        }
+
+        /// <summary> Called when a screenshot file has been written. </summary>
+        internal static void NotifyScreenshotFileSaved(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath))
+                return;
+            var rel = ToScreenshotPathRelativeToGameRoot(fullPath);
+            lock (_screenshotCompletionLock)
+            {
+                _lastScreenshotRelativePath = rel;
+                _pendingScreenshotCompletion = true;
+            }
+        }
+
+        private static string ToScreenshotPathRelativeToGameRoot(string fullPath)
+        {
+            try
+            {
+                var full = Path.GetFullPath(fullPath);
+                var root = Path.GetFullPath(Paths.GameRootPath);
+                if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                {
+                    var tail = full.Length > root.Length ? full.Substring(root.Length) : "";
+                    return tail.TrimStart(Path.DirectorySeparatorChar, '/');
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return Path.GetFileName(fullPath);
+        }
+
         /// <summary>
         /// Maximum allowed screenshot resolution, depends on extreme resolution setting
         /// </summary>
@@ -247,6 +420,8 @@ namespace Screencap
 
         public static ConfigEntry<KeyboardShortcut> KeyCaptureAlphaIn3D { get; private set; }
         public static ConfigEntry<KeyboardShortcut> KeyCapture360in3D { get; private set; }
+        public static ConfigEntry<KeyboardShortcut> KeyCapture180 { get; private set; }
+        public static ConfigEntry<KeyboardShortcut> KeyCapture180in3D { get; private set; }
         public static ConfigEntry<float> EyeSeparation { get; private set; }
         public static ConfigEntry<float> ImageSeparationOffset { get; private set; }
         public static ConfigEntry<bool> FlipEyesIn3DCapture { get; private set; }
@@ -286,6 +461,12 @@ namespace Screencap
                 "General", "Show messages on screen",
                 true,
                 new ConfigDescription("Whether screenshot messages will be displayed on screen. Messages will still be written to the log."));
+
+            ScreenshotSaveRelativePath = Config.Bind(
+                "General", "Screenshot save folder (relative to game)",
+                DefaultScreenshotSaveRelativePath,
+                new ConfigDescription("Folder under the game install where screenshots are saved. Plugins can call SetScreenshotSaveRelativePath to change at runtime."));
+            ScreenshotSaveRelativePath.SettingChanged += (sender, args) => EnsureScreenshotDirectoryExists();
 
             // Must be initialized before ResolutionX and ResolutionY
             ResolutionAllowExtreme = Config.Bind(
@@ -341,7 +522,7 @@ namespace Screencap
             Resolution360 = Config.Bind(
                 "360 Screenshots", "360 screenshot resolution",
                 4096,
-                new ConfigDescription("Horizontal resolution (width) of 360 degree/panorama screenshots. Decrease if you have issues. WARNING: Memory usage can get VERY high - 4096 needs around 4GB of free RAM/VRAM to create, 8192 will need much more.", new AcceptableValueList<int>(1024, 2048, 4096, 8192)));
+                new ConfigDescription("Horizontal resolution (width) of 360°/180° panorama screenshots. Decrease if you have issues or run out of memory. WARNING: Memory and VRAM use rise very quickly with size (8192 and above are heavy; 16384/32768 may fail or crash on some hardware).", new AcceptableValueList<int>(1024, 2048, 4096, 8192, 16384, 32768)));
 
             KeyCaptureAlphaIn3D = Config.Bind(
                 "Keyboard shortcuts", "Take rendered 3D screenshot",
@@ -352,6 +533,16 @@ namespace Screencap
                 "Keyboard shortcuts", "Take 360 3D screenshot",
                 new KeyboardShortcut(KeyCode.F11, KeyCode.LeftControl, KeyCode.LeftShift),
                 new ConfigDescription("Captures a 360 screenshot around current camera in stereoscopic 3D (2 captures for each eye in one image). These images can be viewed by image viewers supporting 3D stereo format (e.g. VR Media Player - 360° Viewer)."));
+
+            KeyCapture180 = Config.Bind(
+                "Keyboard shortcuts", "Take 180 screenshot",
+                new KeyboardShortcut(KeyCode.None),
+                new ConfigDescription("Captures a 180° equirectangular panorama. Assign a key in config; no default binding."));
+
+            KeyCapture180in3D = Config.Bind(
+                "Keyboard shortcuts", "Take 180 3D screenshot",
+                new KeyboardShortcut(KeyCode.None),
+                new ConfigDescription("Captures a 180° panorama in stereoscopic 3D (side-by-side). Assign a key in config; no default binding."));
 
             EyeSeparation = Config.Bind(
                 "3D Settings", "3D screenshot eye separation",
@@ -452,16 +643,10 @@ namespace Screencap
             ResolutionX.SettingChanged += (sender, args) => _resolutionXBuffer = ResolutionX.Value.ToString();
             ResolutionY.SettingChanged += (sender, args) => _resolutionYBuffer = ResolutionY.Value.ToString();
 
-            if (!Directory.Exists(ScreenshotDir))
-                Directory.CreateDirectory(ScreenshotDir);
+            EnsureScreenshotDirectoryExists();
 
             Hooks.InstallHooks();
 
-            var api = WikiPlugin.PublicAPI;
-            if (api != null)
-            {
-                api.RegisterPage("Mein Plugin", "Hauptseite", DrawDemoPage);
-            }
         }
 
         private void Update()
@@ -474,8 +659,10 @@ namespace Screencap
                 _resolutionYBuffer = ResolutionY.Value.ToString();
             }
             else if (KeyCaptureUI.Value.IsDown()) StartCoroutine(TakeUIScreenshot());
-            else if (KeyCapture360.Value.IsDown()) StartCoroutine(Take360Screenshot(false));
-            else if (KeyCapture360in3D.Value.IsDown()) StartCoroutine(Take360Screenshot(true));
+            else if (KeyCapture360.Value.IsDown()) StartCoroutine(Take360Screenshot(false, is180: false));
+            else if (KeyCapture360in3D.Value.IsDown()) StartCoroutine(Take360Screenshot(true, is180: false));
+            else if (KeyCapture180.Value.IsDown()) StartCoroutine(Take360Screenshot(false, is180: true));
+            else if (KeyCapture180in3D.Value.IsDown()) StartCoroutine(Take360Screenshot(true, is180: true));
             else if (KeyCaptureRender.Value.IsDown()) StartCoroutine(TakeRenderScreenshot(false));
             else if (KeyCaptureAlphaIn3D.Value.IsDown()) StartCoroutine(TakeRenderScreenshot(true));
         }
@@ -484,6 +671,8 @@ namespace Screencap
 
         private static string GetUniqueFilename(string capType, bool useJpg)
         {
+            EnsureScreenshotDirectoryExists();
+
             var productName = !string.IsNullOrEmpty(ScreenshotNameOverride.Value)
                 ? ScreenshotNameOverride.Value
                 : Application.productName.Replace(" ", "");
@@ -529,20 +718,24 @@ namespace Screencap
             CaptureUI(filename);
             // Prevent saving text from showing on screenshot
             yield return new WaitForEndOfFrame();
+            NotifyScreenshotFileSaved(filename);
             LogScreenshotMessage("UI", filename);
         }
-        private static IEnumerator Take360Screenshot(bool in3D)
+        // is180: false = full 360° equirectangular; true = 180°.
+        private static IEnumerator Take360Screenshot(bool in3D, bool is180)
         {
             FirePreCapture();
 
             PlayCaptureSound();
-            var filename = GetUniqueFilename(in3D ? "3D-360" : "360", UseJpg.Value);
-            LogScreenshotMessage(in3D ? "3D 360" : "360", filename);
+            var fileTag = in3D ? (is180 ? "3D-180" : "3D-360") : (is180 ? "180" : "360");
+            var logKind = in3D ? (is180 ? "3D 180" : "3D 360") : (is180 ? "180" : "360");
+            var filename = GetUniqueFilename(fileTag, UseJpg.Value);
+            LogScreenshotMessage(logKind, filename);
 
             yield return new WaitForEndOfFrame();
 
             // Overlap offset is not useful in 360 captures, so force it to 0
-            var output = !in3D ? Capture360() : Do3DCapture(() => Capture360(), overlapOffset: 0);
+            var output = !in3D ? Capture360(is180Override: is180) : Do3DCapture(() => Capture360(is180Override: is180), overlapOffset: 0);
 
             FirePostCapture();
 
@@ -561,6 +754,7 @@ namespace Screencap
             DestroyImmediate(t2d);
             yield return null;
             File.WriteAllBytes(filename, bytes);
+            NotifyScreenshotFileSaved(filename);
         }
 
         #endregion
@@ -568,36 +762,9 @@ namespace Screencap
         #region GUI
 
         private readonly int _uiWindowHash = GUID.GetHashCode();
-        private Rect _uiRect = new Rect(20, Mathf.RoundToInt(Screen.height / 2f) - 250, 160, 500);
+        private Rect _uiRect = new Rect(20, Mathf.RoundToInt(Screen.height / 2f) - 250, 280, 500);
         private bool _uiShow;
         private string _resolutionXBuffer = "", _resolutionYBuffer = "";
-
-        private void DrawDemoPage()
-        {
-            GUILayout.Label("<b>Das ist eine Beispielseite für das Wiki.</b>");
-            GUILayout.Space(10);
-
-            GUILayout.Label("Du kannst:");
-            GUILayout.Label("✅ Text anzeigen");
-            GUILayout.Label("✅ Buttons verwenden");
-            GUILayout.Label("✅ Scrollbare Inhalte verwenden");
-            GUILayout.Label("✅ Bilder anzeigen");
-
-            GUILayout.Space(10);
-
-            if (GUILayout.Button("Klick mich!"))
-            {
-                Logger.LogInfo("Button wurde in der Beispielseite geklickt!");
-            }
-
-            GUILayout.Space(20);
-            GUILayout.Label("Bild-Beispiel:");
-
-            GUILayout.Space(10);
-
-            GUILayout.Label("🎞️ Video oder GIFs in Unity GUI sind schwieriger...");
-            GUILayout.Label("Nutze ggf. ein externes Plugin oder HTML/Asset-Browser-Fenster.");
-        }
 
         private void OnGUI()
         {
@@ -865,16 +1032,26 @@ namespace Screencap
 
             GUILayout.Label("Hotkeys (check plugin settings)");
 
-            if (GUILayout.Button(new GUIContent("Capture Normal / UI", "Hotkey: " + KeyCaptureUI.Value)))
+            if (GUILayout.Button(new GUIContent("Capture Normal / UI", "[" + KeyCaptureUI.Value + "]")))
                 StartCoroutine(TakeUIScreenshot());
-            if (GUILayout.Button(new GUIContent("Capture Render", "Hotkey: " + KeyCaptureRender.Value)))
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("Capture Render", "[" + KeyCaptureRender.Value + "]")))
                 StartCoroutine(TakeRenderScreenshot(false));
-            if (GUILayout.Button(new GUIContent("Capture Render 3D", "Hotkey: " + KeyCaptureAlphaIn3D.Value)))
+            if (GUILayout.Button(new GUIContent("Capture Render 3D", "[" + KeyCaptureAlphaIn3D.Value + "]")))
                 StartCoroutine(TakeRenderScreenshot(true));
-            if (GUILayout.Button(new GUIContent("Capture 360", "Hotkey: " + KeyCapture360.Value)))
-                StartCoroutine(Take360Screenshot(false));
-            if (GUILayout.Button(new GUIContent("Capture 360 3D", "Hotkey: " + KeyCapture360in3D.Value)))
-                StartCoroutine(Take360Screenshot(true));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("Capture 360", "[" + KeyCapture360.Value + "]")))
+                StartCoroutine(Take360Screenshot(false, is180: false));
+            if (GUILayout.Button(new GUIContent("Capture 360 3D", "[" + KeyCapture360in3D.Value + "]")))
+                StartCoroutine(Take360Screenshot(true, is180: false));
+            GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(new GUIContent("Capture 180", "[" + KeyCapture180.Value + "]")))
+                StartCoroutine(Take360Screenshot(false, is180: true));
+            if (GUILayout.Button(new GUIContent("Capture 180 3D", "[" + KeyCapture180in3D.Value + "]")))
+                StartCoroutine(Take360Screenshot(true, is180: true));
+            GUILayout.EndHorizontal();
 
             GUI.DragWindow();
             IMGUIUtils.DrawTooltip(_uiRect, 170);

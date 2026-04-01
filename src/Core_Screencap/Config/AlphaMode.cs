@@ -13,15 +13,12 @@ namespace Screencap
     {
         [Description("No transparency")]
         None = 0,
-#if HS2 || AI
-        [Description("Composite")]
-        composite = 1
-#else
-        [Description("Cutout transparency (hard edges)")]
+        [Description("Cutout transparency")]
         blackout = 1,
-        [Description("Gradual transparency (has issues with some effects)")]
+        [Description("Gradual transparency")]
         rgAlpha = 2,
-#endif
+        [Description("Composite")]
+        composite = 3,
     }
 
     internal static class AlphaModeUtils
@@ -32,27 +29,54 @@ namespace Screencap
             {
                 case AlphaMode.None:
                     return "No";
-#if HS2 || AI
-                case AlphaMode.composite:
-                    return "Composite";
-#else
                 case AlphaMode.blackout:
                     return "Cutout";
                 case AlphaMode.rgAlpha:
                     return "Gradual";
-#endif
+                case AlphaMode.composite:
+                    return "Composite";
                 default:
                     return null;
-            };
+            }
         }
 
-        public static readonly AlphaMode Default =
-#if HS2 || AI
-            AlphaMode.composite;
-#else
-            AlphaMode.rgAlpha;
-#endif
+        public static readonly AlphaMode Default = AlphaMode.rgAlpha;
 
         public static readonly string[] AllModes = Enum.GetValues(typeof(AlphaMode)).Cast<AlphaMode>().OrderBy(x => (int)x).Select(x => x.GetDisplayName()).ToArray();
+
+        /// <summary>
+        /// Parses a transparency mode from UI labels (<see cref="AllModes"/>), enum member names, or a numeric index string.
+        /// Availabe modes are: No, Cutout, Gradual, Composite
+        /// </summary>
+        internal static bool TryParseAlphaModeName(string name, out AlphaMode mode)
+        {
+            mode = default;
+            if (string.IsNullOrWhiteSpace(name))
+                return false;
+
+            var trimmed = name.Trim();
+            if (int.TryParse(trimmed, out int idx) && idx >= 0 && idx <= (int)AlphaMode.composite)
+            {
+                mode = (AlphaMode)idx;
+                return Enum.IsDefined(typeof(AlphaMode), mode);
+            }
+
+            foreach (AlphaMode m in Enum.GetValues(typeof(AlphaMode)))
+            {
+                if (string.Equals(m.ToString(), trimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    mode = m;
+                    return true;
+                }
+
+                if (string.Equals(m.GetDisplayName(), trimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    mode = m;
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 }
